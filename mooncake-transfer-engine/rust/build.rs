@@ -13,23 +13,31 @@
 // limitations under the License.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    println!("cargo:rustc-link-search=native=../build/src");
-    println!("cargo:rustc-link-search=native=../../build/mooncake-transfer-engine/src");
+    println!("cargo:rerun-if-env-changed=MOONCAKE_BUILD_DIR");
+    let configured_build = env::var_os("MOONCAKE_BUILD_DIR").map(PathBuf::from);
+    if let Some(build) = configured_build.as_deref() {
+        link_search(build.join("mooncake-transfer-engine/src"));
+        link_search(build.join("mooncake-transfer-engine/src/common/base"));
+        link_search(build.join("mooncake-asio"));
+    } else {
+        link_search("../build/src");
+        link_search("../../build/mooncake-transfer-engine/src");
+        link_search("../build/src/common/base");
+        link_search("../../build/mooncake-transfer-engine/src/common/base");
+        link_search("../build/mooncake-asio");
+        link_search("../../build/mooncake-asio");
+    }
     println!("cargo:rustc-link-lib=static=transfer_engine");
 
     // libbase.a holds mooncake::Status, which libtransfer_engine.a references.
-    println!("cargo:rustc-link-search=native=../build/src/common/base");
-    println!("cargo:rustc-link-search=native=../../build/mooncake-transfer-engine/src/common/base");
     println!("cargo:rustc-link-lib=static=base");
 
     // The transfer_engine build uses ASIO_SEPARATE_COMPILATION + ASIO_DYN_LINK,
     // so the asio symbols live in mooncake-asio/libasio.so.  Link it whenever
     // we can find it (standalone cmake build places it alongside src/).
-    println!("cargo:rustc-link-search=native=../build/mooncake-asio");
-    println!("cargo:rustc-link-search=native=../../build/mooncake-asio");
     println!("cargo:rustc-link-lib=asio");
 
     // EFA on AWS installs libfabric under /opt/amazon/efa/lib.
@@ -105,4 +113,8 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+fn link_search(path: impl AsRef<Path>) {
+    println!("cargo:rustc-link-search=native={}", path.as_ref().display());
 }
