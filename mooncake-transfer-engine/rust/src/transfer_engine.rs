@@ -25,7 +25,7 @@ mod bindings {
 }
 
 use anyhow::{anyhow, bail, Result};
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 
 pub type BatchId = u64;
 
@@ -105,6 +105,19 @@ impl TransferEngine {
         } else {
             Ok(())
         }
+    }
+
+    pub fn local_session_name(&self) -> Result<String> {
+        let mut buffer = [0i8; 256];
+        let ret =
+            unsafe { bindings::getLocalIpAndPort(self.engine, buffer.as_mut_ptr(), buffer.len()) };
+        if ret != 0 {
+            bail!("Failed to get local Transfer Engine session")
+        }
+        let session = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_str()
+            .map_err(|error| anyhow!("Invalid local Transfer Engine session: {error}"))?;
+        Ok(session.to_owned())
     }
 
     /// Register a local memory region with Transfer Engine.
