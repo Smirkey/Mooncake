@@ -19,21 +19,30 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MOONCAKE_BUILD_DIR");
     let configured_build = env::var_os("MOONCAKE_BUILD_DIR").map(PathBuf::from);
     if let Some(build) = configured_build.as_deref() {
+        // Top-level Mooncake build.
         link_search(build.join("mooncake-transfer-engine/src"));
         link_search(build.join("mooncake-transfer-engine/src/common/base"));
-        link_search(build.join("mooncake-asio"));
+        // Standalone mooncake-transfer-engine build.
+        link_search(build.join("src"));
+        link_search(build.join("src/common/base"));
+        link_search(build.join("mooncake-common-src"));
+        // Shared ASIO output in both layouts.
+        link_search(build.join("mooncake-common"));
     } else {
         link_search("../build/src");
         link_search("../../build/mooncake-transfer-engine/src");
         link_search("../build/src/common/base");
         link_search("../../build/mooncake-transfer-engine/src/common/base");
-        link_search("../build/mooncake-asio");
-        link_search("../../build/mooncake-asio");
+        link_search("../build/mooncake-common-src");
+        link_search("../../build/mooncake-common-src");
+        link_search("../build/mooncake-common");
+        link_search("../../build/mooncake-common");
     }
     println!("cargo:rustc-link-lib=static=transfer_engine");
 
     // libbase.a holds mooncake::Status, which libtransfer_engine.a references.
     println!("cargo:rustc-link-lib=static=base");
+    println!("cargo:rustc-link-lib=static=mooncake_common");
 
     // The transfer_engine build uses ASIO_SEPARATE_COMPILATION + ASIO_DYN_LINK,
     // so the asio symbols live in mooncake-asio/libasio.so.  Link it whenever
@@ -62,6 +71,7 @@ fn main() {
     println!("cargo:rustc-link-lib=gflags");
     println!("cargo:rustc-link-lib=pthread");
     println!("cargo:rustc-link-lib=jsoncpp");
+    println!("cargo:rustc-link-lib=yaml-cpp");
     println!("cargo:rustc-link-lib=numa");
     println!("cargo:rustc-link-lib=curl");
 
