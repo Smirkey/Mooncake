@@ -12,17 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod bindings {
-    #![allow(dead_code)]
-    #![allow(non_snake_case)]
-    #![allow(non_camel_case_types)]
-    #![allow(non_upper_case_globals)]
-    #![allow(clippy::redundant_static_lifetimes)]
-    #![allow(clippy::unreadable_literal)]
-    #![allow(clippy::cognitive_complexity)]
-    #![allow(clippy::useless_transmute)]
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
+mod bindings;
 
 use anyhow::{anyhow, bail, Result};
 use std::ffi::{c_void, CStr, CString};
@@ -60,7 +50,7 @@ pub struct BufferEntry {
 }
 
 pub struct TransferEngine {
-    engine: bindings::transfer_engine_t,
+    engine: bindings::TransferEngineHandle,
 }
 
 impl TransferEngine {
