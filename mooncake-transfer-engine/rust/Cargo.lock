@@ -93,15 +93,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
 
 [[package]]
-name = "cc"
-version = "1.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2e7962b54006dcfcc61cb72735f4d89bb97061dd6a7ed882ec6b8ee53714c6f"
-dependencies = [
- "shlex",
-]
-
-[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -166,15 +157,6 @@ name = "clap_lex"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
-
-[[package]]
-name = "cmake"
-version = "0.1.51"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb1e43aa7fd152b1f968787f7dbcdeb306d1867ff373c69955211876c053f91a"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "colorchoice"
@@ -291,10 +273,8 @@ dependencies = [
  "anyhow",
  "bindgen",
  "clap",
- "cmake",
  "dns-lookup",
  "hostname",
- "libc",
  "tracing",
  "tracing-subscriber",
 ]
