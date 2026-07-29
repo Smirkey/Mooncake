@@ -1,7 +1,13 @@
 [package]
-name = "transfer_engine_rust"
+name = "mooncake-transfer-engine"
 version = "0.1.0"
 edition = "2021"
+description = "Rust bindings for Mooncake Transfer Engine"
+license = "Apache-2.0"
+
+[lib]
+name = "mooncake_transfer_engine"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.79"

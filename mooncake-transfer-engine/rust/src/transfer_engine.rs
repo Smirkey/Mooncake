@@ -12,23 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
-
 mod bindings {
     #![allow(dead_code)]
     #![allow(non_snake_case)]
     #![allow(non_camel_case_types)]
     #![allow(non_upper_case_globals)]
-    #![allow(clippy::const_static_lifetime)]
+    #![allow(clippy::redundant_static_lifetimes)]
     #![allow(clippy::unreadable_literal)]
-    #![allow(clippy::cyclomatic_complexity)]
+    #![allow(clippy::cognitive_complexity)]
     #![allow(clippy::useless_transmute)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
 use anyhow::{anyhow, bail, Result};
 use std::ffi::{c_void, CString};
-type BatchID = u64;
+
+pub type BatchId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpcodeEnum {
@@ -65,11 +64,7 @@ pub struct TransferEngine {
 }
 
 impl TransferEngine {
-    pub fn new(
-        metadata_uri: &str,
-        local_server_name: &str,
-        rpc_port: u64,
-    ) -> Result<Self> {
+    pub fn new(metadata_uri: &str, local_server_name: &str, rpc_port: u64) -> Result<Self> {
         let metadata_uri_c =
             CString::new(metadata_uri).map_err(|_| anyhow!("CString::new failed"))?;
         let local_server_name_c =
@@ -112,14 +107,14 @@ impl TransferEngine {
         }
     }
 
-    pub fn close(&mut self) -> Result<()> {
-        unsafe {
-            bindings::destroyTransferEngine(self.engine);
-        }
-        Ok(())
-    }
-
-    pub fn register_local_memory(
+    /// Register a local memory region with Transfer Engine.
+    ///
+    /// # Safety
+    ///
+    /// `addr..addr + length` must remain allocated and accessible until the
+    /// matching call to [`Self::unregister_local_memory`]. No transfer using
+    /// the region may still be in flight when it is unregistered.
+    pub unsafe fn register_local_memory(
         &self,
         addr: *mut c_void,
         length: usize,
@@ -136,7 +131,13 @@ impl TransferEngine {
         }
     }
 
-    pub fn unregister_local_memory(&self, addr: *mut c_void) -> Result<()> {
+    /// Unregister a local memory region.
+    ///
+    /// # Safety
+    ///
+    /// `addr` must identify a live region previously registered with this
+    /// engine, and no transfer using it may still be in flight.
+    pub unsafe fn unregister_local_memory(&self, addr: *mut c_void) -> Result<()> {
         let ret = unsafe { bindings::unregisterLocalMemory(self.engine, addr) };
         if ret < 0 {
             bail!("Failed to unregister local memory")
@@ -145,7 +146,13 @@ impl TransferEngine {
         }
     }
 
-    pub fn register_local_memory_batch(
+    /// Register several local memory regions.
+    ///
+    /// # Safety
+    ///
+    /// Every region must satisfy the safety contract of
+    /// [`Self::register_local_memory`].
+    pub unsafe fn register_local_memory_batch(
         &self,
         buffer_list: &[BufferEntry],
         location: &str,
@@ -154,12 +161,12 @@ impl TransferEngine {
             return Ok(());
         }
         let location_c = CString::new(location).map_err(|_| anyhow!("CString::new failed"))?;
-        let mut buffer_list_c: Vec<bindings::buffer_entry_t> = vec![];
+        let mut buffer_list_c = Vec::with_capacity(buffer_list.len());
         let buffer_len_c = buffer_list.len();
-        for i in 0..buffer_list.len() {
+        for entry in buffer_list {
             buffer_list_c.push(bindings::buffer_entry_t {
-                addr: buffer_list[i].addr,
-                length: buffer_list[i].length as usize,
+                addr: entry.addr,
+                length: entry.length as usize,
             });
         }
         let ret = unsafe {
@@ -177,7 +184,13 @@ impl TransferEngine {
         }
     }
 
-    pub fn unregister_local_memory_batch(&self, buffer_list: &[BufferEntry]) -> Result<()> {
+    /// Unregister several local memory regions.
+    ///
+    /// # Safety
+    ///
+    /// Every region must satisfy the safety contract of
+    /// [`Self::unregister_local_memory`].
+    pub unsafe fn unregister_local_memory_batch(&self, buffer_list: &[BufferEntry]) -> Result<()> {
         if buffer_list.is_empty() {
             return Ok(());
         }
@@ -193,35 +206,47 @@ impl TransferEngine {
         }
     }
 
-    pub fn allocate_batch_id(&self, batch_size: usize) -> Result<BatchID> {
+    pub fn allocate_batch_id(&self, batch_size: usize) -> Result<BatchId> {
         let ret = unsafe { bindings::allocateBatchID(self.engine, batch_size) };
         if ret == u64::MAX {
             bail!("Failed to allocate batch ID")
         } else {
-            Ok(ret as BatchID)
+            Ok(ret as BatchId)
         }
     }
 
-    pub fn submit_transfer(
+    /// Submit a transfer batch.
+    ///
+    /// # Safety
+    ///
+    /// Every request source must remain valid and registered until the
+    /// transfer completes. Target offsets must address registered memory in
+    /// the corresponding remote segment.
+    pub unsafe fn submit_transfer(
         &self,
-        batch_id: BatchID,
-        requests: &mut [TransferRequest],
+        batch_id: BatchId,
+        requests: &[TransferRequest],
     ) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
-        let mut requests_c: Vec<bindings::transfer_request_t> = vec![];
-        for i in 0..requests.len() {
+        let mut requests_c = Vec::with_capacity(requests.len());
+        for request in requests {
             requests_c.push(bindings::transfer_request_t {
-                opcode: requests[i].opcode as i32,
-                source: requests[i].source,
-                target_id: requests[i].target_id,
-                target_offset: requests[i].target_offset,
-                length: requests[i].length,
+                opcode: request.opcode as i32,
+                source: request.source,
+                target_id: request.target_id,
+                target_offset: request.target_offset,
+                length: request.length,
             })
         }
         let ret = unsafe {
-            bindings::submitTransfer(self.engine, batch_id, requests_c.as_mut_ptr(), requests.len())
+            bindings::submitTransfer(
+                self.engine,
+                batch_id,
+                requests_c.as_mut_ptr(),
+                requests.len(),
+            )
         };
         if ret != 0 {
             bail!("Failed to submit transfer")
@@ -230,13 +255,14 @@ impl TransferEngine {
         }
     }
 
-    pub fn get_transfer_status(&self, batch_id: BatchID, task_id: u64) -> Result<(i32, u64)> {
+    pub fn get_transfer_status(&self, batch_id: BatchId, task_id: u64) -> Result<(i32, u64)> {
         let mut status = bindings::transfer_status_t {
             status: 0,
             transferred_bytes: 0,
         };
-        let ret =
-            unsafe { bindings::getTransferStatus(self.engine, batch_id, task_id as usize, &mut status) };
+        let ret = unsafe {
+            bindings::getTransferStatus(self.engine, batch_id, task_id as usize, &mut status)
+        };
         if ret != 0 {
             bail!("Failed to get transfer status")
         } else {
@@ -244,7 +270,7 @@ impl TransferEngine {
         }
     }
 
-    pub fn free_batch_id(&self, batch_id: BatchID) -> Result<()> {
+    pub fn free_batch_id(&self, batch_id: BatchId) -> Result<()> {
         let ret = unsafe { bindings::freeBatchID(self.engine, batch_id) };
         if ret != 0 {
             bail!("Failed to free batch ID")
@@ -298,9 +324,14 @@ impl TransferEngine {
 
 impl Drop for TransferEngine {
     fn drop(&mut self) {
-        self.close().expect("Failed to close transfer engine");
+        unsafe {
+            bindings::destroyTransferEngine(self.engine);
+        }
     }
 }
 
+// TransferEngine's C++ implementation internally synchronizes its shared
+// state. The raw handle is owned by this value and destroyed only after the
+// last Rust reference is dropped.
 unsafe impl Send for TransferEngine {}
 unsafe impl Sync for TransferEngine {}

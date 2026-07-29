@@ -13,18 +13,17 @@
 // limitations under the License.
 
 mod memory_pool;
-mod transfer_engine;
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use dns_lookup::{get_hostname, getaddrinfo, AddrInfoHints, SockType};
+use mooncake_transfer_engine::{OpcodeEnum, TransferEngine, TransferRequest, TransferStatusEnum};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::{net::IpAddr, time::Instant};
 use tracing::{error, info};
-use transfer_engine::{OpcodeEnum, TransferEngine, TransferRequest, TransferStatusEnum};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -132,7 +131,9 @@ fn initiator_worker(
             });
         }
 
-        engine.submit_transfer(batch_id, &mut requests)?;
+        // SAFETY: every request points into `pool`, which stays allocated until
+        // all submitted transfers have completed.
+        unsafe { engine.submit_transfer(batch_id, &requests)? };
 
         for task_id in 0..args.batch_size {
             let mut completed = false;
@@ -163,7 +164,8 @@ fn initiator(args: Args) -> Result<()> {
 
     let dram_buffer_size = 1 << 30;
     let pool = Arc::new(memory_pool::MemoryPool::new(dram_buffer_size));
-    engine.register_local_memory(pool.offset(0) as *mut _, dram_buffer_size, "cpu:0")?;
+    // SAFETY: `pool` remains alive until after the matching unregister call.
+    unsafe { engine.register_local_memory(pool.offset(0) as *mut _, dram_buffer_size, "cpu:0")? };
 
     let segment_id = engine.open_segment(args.segment_id.clone())?;
     let total_batch_count = Arc::new(AtomicUsize::new(0));
@@ -203,22 +205,20 @@ fn initiator(args: Args) -> Result<()> {
         (batch_count * args.batch_size as usize * args.block_size as usize) as f64 / duration / 1e9
     );
 
-    engine.unregister_local_memory(pool.offset(0) as *mut _)?;
+    // SAFETY: this is the address registered above and no transfer is in flight.
+    unsafe { engine.unregister_local_memory(pool.offset(0) as *mut _)? };
 
     Ok(())
 }
 
 fn target(args: Args) -> Result<()> {
-    let engine = TransferEngine::new(
-        &args.metadata_server,
-        &get_host_ip()?,
-        12345,
-    )?;
+    let engine = TransferEngine::new(&args.metadata_server, &get_host_ip()?, 12345)?;
 
     let dram_buffer_size = 1 << 30;
     let addr = allocate_memory_pool(dram_buffer_size);
 
-    engine.register_local_memory(addr as *mut _, dram_buffer_size, "cpu:0")?;
+    // SAFETY: `addr` remains allocated until after the matching unregister.
+    unsafe { engine.register_local_memory(addr as *mut _, dram_buffer_size, "cpu:0")? };
 
     loop {
         thread::sleep(Duration::from_secs(1));
@@ -226,7 +226,8 @@ fn target(args: Args) -> Result<()> {
 
     #[allow(unreachable_code)]
     {
-        engine.unregister_local_memory(addr as *mut _)?;
+        // SAFETY: this is the address registered above and no transfer is in flight.
+        unsafe { engine.unregister_local_memory(addr as *mut _)? };
         unsafe {
             free_memory_pool(addr, dram_buffer_size);
         }
