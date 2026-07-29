@@ -1,9 +1,12 @@
 file(GLOB XPORT_SOURCES "*.cpp")
 
 add_subdirectory(rdma_transport)
-add_subdirectory(rpc_communicator)
-add_library(transport OBJECT ${XPORT_SOURCES} $<TARGET_OBJECTS:rdma_transport>
-                             $<TARGET_OBJECTS:rpc_communicator>)
+option(WITH_RPC_COMMUNICATOR "Build the Python RPC communicator" ON)
+add_library(transport OBJECT ${XPORT_SOURCES} $<TARGET_OBJECTS:rdma_transport>)
+if(WITH_RPC_COMMUNICATOR)
+  add_subdirectory(rpc_communicator)
+  target_sources(transport PUBLIC $<TARGET_OBJECTS:rpc_communicator>)
+endif()
 target_link_libraries(
   transport PRIVATE JsonCpp::JsonCpp yalantinglibs::yalantinglibs glog::glog
                     pthread)
