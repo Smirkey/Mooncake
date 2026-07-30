@@ -14,11 +14,19 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MOONCAKE_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=MOONCAKE_WITH_CUDA");
+    println!("cargo:rerun-if-env-changed=MOONCAKE_WITH_EFA");
     let configured_build = env::var_os("MOONCAKE_BUILD_DIR").map(PathBuf::from);
-    if let Some(build) = configured_build.as_deref() {
+    let owned_build = if configured_build.is_none() && target_os() == "linux" {
+        Some(build_native().unwrap_or_else(|error| panic!("{error}")))
+    } else {
+        None
+    };
+    if let Some(build) = configured_build.as_deref().or(owned_build.as_deref()) {
         // Top-level Mooncake build.
         link_search(build.join("mooncake-transfer-engine/src"));
         link_search(build.join("mooncake-transfer-engine/src/common/base"));
@@ -44,10 +52,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=base");
     println!("cargo:rustc-link-lib=static=mooncake_common");
 
-    // The transfer_engine build uses ASIO_SEPARATE_COMPILATION + ASIO_DYN_LINK,
-    // so the asio symbols live in mooncake-asio/libasio.so.  Link it whenever
-    // we can find it (standalone cmake build places it alongside src/).
-    println!("cargo:rustc-link-lib=asio");
+    println!("cargo:rustc-link-lib=static=asio_static");
 
     // EFA on AWS installs libfabric under /opt/amazon/efa/lib.
     if std::path::Path::new("/opt/amazon/efa/lib").exists() {
@@ -56,15 +61,7 @@ fn main() {
 
     println!("cargo:rustc-link-lib=stdc++");
     println!("cargo:rustc-link-lib=ibverbs");
-    // libfabric (fi_*): only needed for EFA transport, but harmless when
-    // the system has it installed; required on AWS EFA hosts.  Opt-out by
-    // setting MOONCAKE_WITHOUT_LIBFABRIC=1 if building on a box without it.
-    if env::var("MOONCAKE_WITHOUT_LIBFABRIC")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        // skip
-    } else {
+    if flag_on("MOONCAKE_WITH_EFA") {
         println!("cargo:rustc-link-lib=fabric");
     }
     println!("cargo:rustc-link-lib=glog");
@@ -74,12 +71,6 @@ fn main() {
     println!("cargo:rustc-link-lib=yaml-cpp");
     println!("cargo:rustc-link-lib=numa");
     println!("cargo:rustc-link-lib=curl");
-
-    let flag_on = |name: &str| {
-        env::var(name)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("on") || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    };
 
     // etcd-cpp-api: only needed when transfer_engine was built with
     // USE_ETCD=ON.  Opt-in via MOONCAKE_WITH_ETCD=1 to keep non-etcd builds
@@ -92,7 +83,7 @@ fn main() {
     // cudaMemcpy/cudaStream* symbols.  The Rust demos themselves don't call
     // CUDA — this is purely a transitive archive dep.  Enable with
     // MOONCAKE_WITH_CUDA=1 and optional CUDA_HOME override for lib path.
-    if flag_on("MOONCAKE_WITH_CUDA") {
+    if owned_build.is_some() || flag_on("MOONCAKE_WITH_CUDA") {
         // Accept either a CUDA_HOME (append lib64/lib) or an explicit
         // CUDART_LIB_DIR that already points at the directory containing
         // libcudart.so.  This covers both /usr/local/cuda installs and
@@ -120,4 +111,86 @@ fn main() {
 
 fn link_search(path: impl AsRef<Path>) {
     println!("cargo:rustc-link-search=native={}", path.as_ref().display());
+}
+
+fn target_os() -> String {
+    env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+fn flag_on(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            value == "1" || value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+fn build_native() -> Result<PathBuf, String> {
+    let manifest = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .ok_or_else(|| "CARGO_MANIFEST_DIR is not set".to_owned())?,
+    );
+    let source = [
+        manifest
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|path| path.join("CMakeLists.txt").is_file()),
+        Some(manifest.join("mooncake-transfer-engine"))
+            .filter(|path| path.join("CMakeLists.txt").is_file()),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .ok_or_else(|| {
+        format!(
+            "Mooncake native sources are unavailable beside {}",
+            manifest.display()
+        )
+    })?;
+    let build =
+        PathBuf::from(env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is not set".to_owned())?)
+            .join("native");
+    let mut configure = Command::new("cmake");
+    configure
+        .arg("-S")
+        .arg(&source)
+        .arg("-B")
+        .arg(&build)
+        .args([
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_BENCHMARK=OFF",
+            "-DBUILD_EXAMPLES=OFF",
+            "-DBUILD_UNIT_TESTS=OFF",
+            "-DENABLE_DEBUG_SYMBOLS=OFF",
+            "-DUSE_CUDA=ON",
+            "-DUSE_HTTP=OFF",
+            "-DUSE_TCP=ON",
+            "-DWITH_METRICS=OFF",
+            "-DWITH_RUST_EXAMPLE=OFF",
+            "-DWITH_STORE_C_SHARED=ON",
+        ]);
+    if flag_on("MOONCAKE_WITH_EFA") {
+        configure.arg("-DUSE_EFA=ON");
+    }
+    run(&mut configure, "configure Mooncake Transfer Engine")?;
+
+    let mut compile = Command::new("cmake");
+    compile
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "transfer_engine", "asio_static", "--parallel"])
+        .arg(env::var("NUM_JOBS").unwrap_or_else(|_| "1".to_owned()));
+    run(&mut compile, "build Mooncake Transfer Engine")?;
+    Ok(build)
+}
+
+fn run(command: &mut Command, description: &str) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|error| format!("{description}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{description} exited with {status}"))
+    }
 }
