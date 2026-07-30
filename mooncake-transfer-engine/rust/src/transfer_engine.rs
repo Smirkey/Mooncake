@@ -54,17 +54,24 @@ pub struct TransferEngine {
 }
 
 impl TransferEngine {
-    pub fn new(metadata_uri: &str, local_server_name: &str, rpc_port: u64) -> Result<Self> {
+    pub fn new(
+        metadata_uri: &str,
+        local_server_name: &str,
+        advertised_host: &str,
+        rpc_port: u64,
+    ) -> Result<Self> {
         let metadata_uri_c =
             CString::new(metadata_uri).map_err(|_| anyhow!("CString::new failed"))?;
         let local_server_name_c =
             CString::new(local_server_name).map_err(|_| anyhow!("CString::new failed"))?;
+        let advertised_host_c =
+            CString::new(advertised_host).map_err(|_| anyhow!("CString::new failed"))?;
 
         let engine = unsafe {
             bindings::createTransferEngine(
                 metadata_uri_c.as_ptr(),
                 local_server_name_c.as_ptr(),
-                local_server_name_c.as_ptr(),
+                advertised_host_c.as_ptr(),
                 rpc_port,
                 0, // disable auto_discover
             )

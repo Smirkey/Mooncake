@@ -156,9 +156,11 @@ fn initiator_worker(
 
 fn initiator(args: Args) -> Result<()> {
     let args = Arc::new(args);
+    let host = get_host_ip()?;
     let engine = Arc::new(TransferEngine::new(
         &args.metadata_server,
-        &get_host_ip()?,
+        &host,
+        &host,
         12345,
     )?);
 
@@ -212,7 +214,8 @@ fn initiator(args: Args) -> Result<()> {
 }
 
 fn target(args: Args) -> Result<()> {
-    let engine = TransferEngine::new(&args.metadata_server, &get_host_ip()?, 12345)?;
+    let host = get_host_ip()?;
+    let engine = TransferEngine::new(&args.metadata_server, &host, &host, 12345)?;
 
     let dram_buffer_size = 1 << 30;
     let addr = allocate_memory_pool(dram_buffer_size);
