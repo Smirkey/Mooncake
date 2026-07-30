@@ -464,6 +464,8 @@ int RdmaContext::exportDmabuf(void *addr, DmabufExport &out) {
         out.method = DmabufExport::Method::kDmabufReg;
         out.fd = dmabuf_fd;
         out.offset = (uintptr_t)addr - (uintptr_t)allocBase;
+        out.max_length =
+            allocSize - ((uintptr_t)addr - (uintptr_t)allocBase);
 #if defined(USE_CUDA)
         cuDevicePrimaryCtxRelease(cuDev);
 #endif
@@ -548,6 +550,8 @@ int RdmaContext::exportDmabuf(void *addr, DmabufExport &out) {
         // Offset within the dmabuf-backed region: distance from the
         // allocation base, plus any offset hsa returned for the export.
         out.offset = (uintptr_t)addr - (uintptr_t)allocBase + hsa_dmabuf_offset;
+        out.max_length =
+            allocSize - ((uintptr_t)addr - (uintptr_t)allocBase);
     }
 #else
     out.method = DmabufExport::Method::kHostReg;

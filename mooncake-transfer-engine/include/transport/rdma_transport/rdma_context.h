@@ -88,17 +88,16 @@ struct MemoryRegionMeta {
     struct ibv_mr *mr;
 };
 
-// A dma_buf handle exported once for a buffer and shared across every NIC's
-// registration of that buffer. Exporting a single fd (instead of one per NIC)
-// collapses the per-NIC dma_buf objects into one kernel object, so the GPU
-// driver reserves a single BAR1 window for the buffer rather than one window
-// per NIC. Host memory (and the nvidia-peermem path) yields kHostReg with no
-// fd, taking the plain ibv_reg_mr path.
+// A dma_buf handle exported once for one physical allocation and shared across
+// every NIC's registration. A contiguous CUDA VMM range may require several of
+// these, one per cuMemCreate handle. Host memory (and the nvidia-peermem path)
+// yields kHostReg with no fd, taking the plain ibv_reg_mr path.
 struct DmabufExport {
     enum class Method { kHostReg, kDmabufReg };
     Method method = Method::kHostReg;
-    int fd = -1;          // live dma_buf fd; -1 when not applicable
-    uint64_t offset = 0;  // offset of addr within the exported allocation
+    int fd = -1;             // live dma_buf fd; -1 when not applicable
+    uint64_t offset = 0;     // offset of addr within the exported allocation
+    size_t max_length = 0;   // bytes from addr covered by this dma_buf
 };
 
 // RdmaContext represents the set of resources controlled by each local NIC,
@@ -131,13 +130,12 @@ class RdmaContext {
     int registerMemoryRegion(void *addr, size_t length, int access,
                              const DmabufExport &exp);
 
-    // Exports a single dma_buf fd for the allocation backing addr. GPU device
-    // memory yields kDmabufReg with a live fd; host memory and the
-    // nvidia-peermem path yield kHostReg with no fd. Any fd placed in out.fd
-    // MUST be closed by the caller (via closeDmabufExport) AFTER every
-    // registerMemoryRegion() call consuming it has returned — each successful
-    // registration takes its own reference, so closing earlier would invalidate
-    // the fd for the remaining NICs.
+    // Exports a dma_buf fd for the physical allocation backing addr and reports
+    // how many bytes remain in that allocation. GPU device memory yields
+    // kDmabufReg with a live fd; host memory and the nvidia-peermem path yield
+    // kHostReg with no fd. Any fd placed in out.fd MUST be closed by the caller
+    // (via closeDmabufExport) AFTER every registerMemoryRegion() call consuming
+    // it has returned.
     static int exportDmabuf(void *addr, DmabufExport &out);
 
     // Closes the fd held by a DmabufExport, if any. Idempotent.

@@ -224,28 +224,58 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         access_rights |= IBV_ACCESS_RELAXED_ORDERING;
     }
 
-    // Mooncake#2017: ibv_reg_mr silently truncates a registration to the device
-    // max_mr_size, but the metadata would still advertise the full BufferDesc
-    // length, so any remote RDMA op past the boundary fails with
-    // IBV_WC_REM_ACCESS_ERR (ionic CQE error 10). Split buffers larger than
-    // max_mr_size into chunks of <= max_mr_size, register each as its own MR,
-    // and publish one BufferDesc per chunk (the per-context rkey/lkey lookups
-    // are address-range based, so each chunk gets the correct key).
+    // Split at both the HCA MR limit and CUDA allocation-handle boundaries.
+    // NVSHMEM and other VMM allocators map multiple cuMemCreate handles into
+    // one contiguous VA range. A dma_buf fd covers only the handle containing
+    // the exported address, so registering past that boundary fails with
+    // EINVAL (or produces an MR that faults at transfer time).
     size_t chunk_limit = (size_t)globalConfig().max_mr_size;
-    std::vector<std::pair<void *, size_t>> chunks;
-    if (chunk_limit > 0 && length > chunk_limit) {
-        for (size_t offset = 0; offset < length;) {
-            size_t chunk_len = std::min(chunk_limit, length - offset);
-            chunks.emplace_back(static_cast<char *>(addr) + offset, chunk_len);
-            offset += chunk_len;
+    struct RegistrationChunk {
+        void *addr;
+        size_t length;
+        DmabufExport dmabuf;
+    };
+    std::vector<RegistrationChunk> chunks;
+    for (size_t offset = 0; offset < length;) {
+        void *chunk_addr = static_cast<char *>(addr) + offset;
+        size_t chunk_len = length - offset;
+        if (chunk_limit > 0) chunk_len = std::min(chunk_len, chunk_limit);
+
+        DmabufExport dmabuf;
+        if (!context_list_.empty()) {
+            int ret = RdmaContext::exportDmabuf(chunk_addr, dmabuf);
+            if (ret != 0) {
+                for (auto &chunk : chunks)
+                    RdmaContext::closeDmabufExport(chunk.dmabuf);
+                LOG(ERROR) << "Failed to export dma_buf for addr="
+                           << chunk_addr;
+                return ret;
+            }
+            if (dmabuf.method == DmabufExport::Method::kDmabufReg) {
+                if (dmabuf.max_length == 0) {
+                    RdmaContext::closeDmabufExport(dmabuf);
+                    for (auto &chunk : chunks)
+                        RdmaContext::closeDmabufExport(chunk.dmabuf);
+                    LOG(ERROR) << "dma_buf export has an empty range for addr="
+                               << chunk_addr;
+                    return ERR_CONTEXT;
+                }
+                chunk_len = std::min(chunk_len, dmabuf.max_length);
+            }
         }
-        LOG(WARNING) << "Auto-splitting buffer " << addr << " (" << length
-                     << " bytes) into " << chunks.size()
-                     << " chunks of <= " << chunk_limit
-                     << " bytes each (device max_mr_size; Mooncake#2017)";
-    } else {
-        chunks.emplace_back(addr, length);
+        chunks.push_back({chunk_addr, chunk_len, dmabuf});
+        offset += chunk_len;
     }
+
+    // Keep every fd alive until all registrations complete. Each VMM handle
+    // owns one dma_buf object shared across all NIC protection domains.
+    struct DmabufCloser {
+        std::vector<RegistrationChunk> &chunks;
+        ~DmabufCloser() {
+            for (auto &chunk : chunks)
+                RdmaContext::closeDmabufExport(chunk.dmabuf);
+        }
+    } dmabuf_closer{chunks};
 
     // Resolve the location name once, from the original buffer.
     std::string resolved_name;
@@ -258,26 +288,6 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     } else {
         resolved_name = name;
     }
-
-    // Export a single dma_buf fd for the whole buffer and import it into every
-    // NIC's PD during each chunk's registration below (one dma_buf object
-    // shared across NICs keeps a single BAR1 window for the buffer instead of
-    // one per NIC). Host memory yields an empty export (plain ibv_reg_mr). The
-    // fd must stay open across every registration that consumes it (each MR
-    // takes its own reference), so it is closed once, on any return path, by
-    // the RAII guard below.
-    DmabufExport dmabuf_exp;
-    if (!context_list_.empty()) {
-        int eret = RdmaContext::exportDmabuf(addr, dmabuf_exp);
-        if (eret != 0) {
-            LOG(ERROR) << "Failed to export dma_buf for addr=" << addr;
-            return eret;
-        }
-    }
-    struct DmabufCloser {
-        DmabufExport &exp;
-        ~DmabufCloser() { RdmaContext::closeDmabufExport(exp); }
-    } dmabuf_closer{dmabuf_exp};
 
     // Best-effort unregister of ONE chunk's MRs across all contexts. Used to
     // clean up a chunk whose registration failed part-way (some contexts
@@ -303,12 +313,12 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         size_t n = std::min(committed, chunks.size());
         for (size_t ri = 0; ri < n; ++ri) {
             int rc = metadata_->removeLocalMemoryBuffer(
-                chunks[ri].first, /*update_metadata=*/false);
+                chunks[ri].addr, /*update_metadata=*/false);
             if (rc)
                 LOG(WARNING) << "Rollback: failed to remove metadata for chunk "
                                 "at "
-                             << chunks[ri].first << " (ret=" << rc << ")";
-            unregisterChunkMRs(chunks[ri].first);
+                             << chunks[ri].addr << " (ret=" << rc << ")";
+            unregisterChunkMRs(chunks[ri].addr);
         }
         if (n > 0 && update_metadata) metadata_->updateLocalSegmentDesc();
     };
@@ -323,8 +333,9 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
                               length >= (size_t)4 * 1024 * 1024 * 1024;
 
     for (size_t ci = 0; ci < chunks.size(); ++ci) {
-        void *chunk_addr = chunks[ci].first;
-        size_t chunk_len = chunks[ci].second;
+        void *chunk_addr = chunks[ci].addr;
+        size_t chunk_len = chunks[ci].length;
+        const DmabufExport &dmabuf = chunks[ci].dmabuf;
 
         if (do_pre_touch) {
             // Parallel pre-touch the memory to speed up registration.
@@ -360,10 +371,10 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
             const int ar = access_rights;  // Local copy for lambda capture
 
             for (size_t i = 0; i < context_list_.size(); ++i) {
-                reg_threads.emplace_back([this, &ret_codes, &dmabuf_exp, i,
+                reg_threads.emplace_back([this, &ret_codes, &dmabuf, i,
                                           chunk_addr, chunk_len, ar]() {
                     ret_codes[i] = context_list_[i]->registerMemoryRegion(
-                        chunk_addr, chunk_len, ar, dmabuf_exp);
+                        chunk_addr, chunk_len, ar, dmabuf);
                 });
             }
 
@@ -384,7 +395,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         } else {
             for (size_t i = 0; i < context_list_.size(); ++i) {
                 int ret = context_list_[i]->registerMemoryRegion(
-                    chunk_addr, chunk_len, access_rights, dmabuf_exp);
+                    chunk_addr, chunk_len, access_rights, dmabuf);
                 if (ret) {
                     LOG(ERROR) << "Failed to register memory region (chunk "
                                << ci << ") with context " << i;
@@ -454,7 +465,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         std::lock_guard<std::mutex> lock(chunk_map_mutex_);
         std::vector<uint64_t> chunk_addrs;
         chunk_addrs.reserve(chunks.size());
-        for (auto &c : chunks) chunk_addrs.push_back((uint64_t)c.first);
+        for (auto &c : chunks) chunk_addrs.push_back((uint64_t)c.addr);
         chunk_map_[(uint64_t)addr] = std::move(chunk_addrs);
     }
     return 0;
