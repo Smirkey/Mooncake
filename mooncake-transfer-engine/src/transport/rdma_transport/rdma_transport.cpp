@@ -54,6 +54,23 @@ static std::string resolveBufferLocation(
     return location;
 }
 
+static size_t registeredBufferBytesRemaining(
+    const TransferMetadata::SegmentDesc *desc, uint64_t address) {
+    if (desc == nullptr) return 0;
+
+    size_t remaining = 0;
+    for (const auto &buffer : desc->buffers) {
+#ifdef ENABLE_MULTI_PROTOCOL
+        if (!buffer.protocol.empty() && buffer.protocol != "rdma") continue;
+#endif
+        if (address < buffer.addr || address - buffer.addr >= buffer.length)
+            continue;
+        remaining =
+            std::max(remaining, buffer.length - (address - buffer.addr));
+    }
+    return remaining;
+}
+
 // Mode definition for MC_IB_PCI_RELAXED_ORDERING env.
 // 0 - disabled, 1 - enabled if supported, 2 - auto (default, same as 1 today).
 static int getIbRelaxedOrderingMode() {
@@ -766,6 +783,8 @@ Status RdmaTransport::submitTransferTask(
     const size_t kFragmentSize = globalConfig().fragment_limit;
     const size_t kSubmitWatermark =
         globalConfig().max_wr * globalConfig().num_qp_per_ep;
+    std::unordered_map<SegmentID, std::shared_ptr<SegmentDesc>>
+        peer_segment_descs;
     uint64_t nr_slices;
     for (size_t index = 0; index < task_list.size(); ++index) {
         assert(task_list[index]);
@@ -773,6 +792,11 @@ Status RdmaTransport::submitTransferTask(
         nr_slices = 0;
         assert(task.request);
         auto &request = *task.request;
+        auto [peer_it, inserted] =
+            peer_segment_descs.try_emplace(request.target_id);
+        if (inserted)
+            peer_it->second = metadata_->getSegmentDescByID(request.target_id);
+        const auto &peer_segment_desc = peer_it->second;
 
         auto request_buffer_id = -1, request_device_id = -1;
         if (selectDevice(local_segment_desc.get(), (uint64_t)request.source,
@@ -782,20 +806,40 @@ Status RdmaTransport::submitTransferTask(
             request_device_id = -1;
         }
 
-        for (uint64_t offset = 0; offset < request.length;
-             offset += kBlockSize) {
+        for (uint64_t offset = 0; offset < request.length;) {
+            const uint64_t source_address =
+                reinterpret_cast<uint64_t>(request.source) + offset;
+            const uint64_t target_address = request.target_offset + offset;
+            const size_t source_remaining = registeredBufferBytesRemaining(
+                local_segment_desc.get(), source_address);
+            const size_t target_remaining = registeredBufferBytesRemaining(
+                peer_segment_desc.get(), target_address);
+            if (source_remaining == 0 || target_remaining == 0) {
+                LOG(ERROR) << "Transfer range is not registered: source="
+                           << reinterpret_cast<void *>(source_address)
+                           << ", target="
+                           << reinterpret_cast<void *>(target_address);
+                return Status::AddressNotRegistered(
+                    "Transfer source or target range is not registered");
+            }
+
+            const size_t request_remaining = request.length - offset;
+            const bool merge_final_slice =
+                request_remaining <= kBlockSize + kFragmentSize;
+            const size_t preferred_length =
+                merge_final_slice ? request_remaining : kBlockSize;
+            const size_t slice_length =
+                std::min({preferred_length, source_remaining,
+                          target_remaining});
+
             Slice *slice = getSliceCache().allocate();
             assert(slice);
             if (!slice->from_cache) {
                 nr_slices++;
             }
 
-            bool merge_final_slice =
-                request.length - offset <= kBlockSize + kFragmentSize;
-
             slice->source_addr = (char *)request.source + offset;
-            slice->length =
-                merge_final_slice ? request.length - offset : kBlockSize;
+            slice->length = slice_length;
             slice->source_location.clear();
             slice->opcode = request.opcode;
             slice->rdma.dest_addr = request.target_offset + offset;
@@ -879,9 +923,7 @@ Status RdmaTransport::submitTransferTask(
                 nr_slices = 0;
             }
 
-            if (merge_final_slice) {
-                break;
-            }
+            offset += slice_length;
         }
     }
 
