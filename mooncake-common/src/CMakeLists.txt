@@ -35,9 +35,11 @@ if(WITH_STORE_C_SHARED)
   add_library(asio_static STATIC asio_impl.cpp)
   target_compile_definitions(asio_static PUBLIC ASIO_SEPARATE_COMPILATION
                                                 ASIO_DYN_LINK)
-  target_include_directories(asio_static PUBLIC ${ASIO_INCLUDE_DIR})
   set_target_properties(asio_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(asio_static PUBLIC pthread)
+  target_link_libraries(asio_static PUBLIC
+      pthread
+      yalantinglibs::yalantinglibs
+  )
 endif()
 
 add_library(mooncake_common
